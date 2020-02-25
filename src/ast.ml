@@ -183,6 +183,12 @@ let is_arithmetic_type t =
     Int (_, _)|RealType|Float|Double|LongDouble -> true
   | _ -> false
 
+let is_inductive_type t =
+  (match t with
+  | InductiveType _ -> true
+  | _ -> false
+  )
+
 type prover_type = ProverInt | ProverBool | ProverReal | ProverInductive (* ?prover_type *)
 
 class predref (name: string) (domain: type_ list) (inputParamCount: int option) = (* ?predref *)

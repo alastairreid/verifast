@@ -82,6 +82,7 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
             | RefType t -> (* free locals of which the address is taken *)
               consume_c_object closeBraceLoc addr t h true $. fun h ->
               free_locals_core h locals
+            | InductiveType _ -> free_locals_core h locals
       in
       match locals with
         [] -> cont h env
@@ -637,7 +638,7 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
                 let w = check_expr_t (pn,ilist) tparams tenv e t in
                 verify_expr false h env (Some x) w (fun h env v -> cont h env v) econt
             end $. fun h env v ->
-            if !address_taken then
+            if !address_taken && not (is_inductive_type t) then
               let addr = get_unique_var_symb_non_ghost (x ^ "_addr") (PtrType t) in
               let h = ((Chunk ((pointee_pred_symb l t, true), [], real_unit, [addr; v], None)) :: h) in
               if pure then static_error l "Taking the address of a ghost variable is not allowed." None;
@@ -2467,7 +2468,7 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     let penv = get_unique_var_symbs_ ps (match k with Regular -> false | _ -> true) in (* actual params invullen *)
     let heapy_vars = list_remove_dups (List.flatten (List.map (fun s -> stmt_address_taken s) ss)) in
     let heapy_ps = List.flatten (List.map (fun (x,tp) -> 
-      if List.mem x heapy_vars then 
+      if List.mem x heapy_vars && not (is_inductive_type tp) then 
         let addr = get_unique_var_symb_non_ghost (x ^ "_addr") (PtrType tp) in
         [(l, x, tp, addr)] 
       else 

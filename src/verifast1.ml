@@ -3113,12 +3113,11 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         | _ -> static_error l "Operand must be pointer." None
       end
     | AddressOf (l, Var(l2, x)) when List.mem_assoc x tenv ->
-      let pointeeType =
-        match List.assoc x tenv with
-          RefType(t) -> t
-        | _ -> static_error l "Taking the address of this expression is not supported." None
-      in
-      (WVar (l2, x, LocalVar), PtrType pointeeType, None)
+      begin match List.assoc x tenv with
+        RefType(pointeeType) -> (WVar (l2, x, LocalVar), PtrType pointeeType, None)
+      | InductiveType _ as t -> (WVar (l2, x, LocalVar), t, None)
+      | _ -> static_error l "Taking the address of this expression is not supported." None
+      end
     | AddressOf (l, e) -> let (w, t, _) = check e in (AddressOf (l, w), PtrType t, None)
     | CallExpr (l, "getClass", [], [], [LitPat target], Instance) when language = Java ->
       let w = checkt target (ObjType "java.lang.Object") in
