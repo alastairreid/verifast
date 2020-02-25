@@ -627,7 +627,7 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
           match t with
             StaticArrayType (elemTp, elemCount) ->
             produce_object t
-          | StructType sn ->
+          | StructType sn when !address_taken ->
             produce_object (RefType t)
           | _ ->
             begin fun cont ->
@@ -637,13 +637,15 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
                 let w = check_expr_t (pn,ilist) tparams tenv e t in
                 verify_expr false h env (Some x) w (fun h env v -> cont h env v) econt
             end $. fun h env v ->
-            if !address_taken then
+            if !address_taken then begin
+              if is_inductive_type(t) then static_error l "Taking the address of an inductive variable is not allowed." None;
               let addr = get_unique_var_symb_non_ghost (x ^ "_addr") (PtrType t) in
               let h = ((Chunk ((pointee_pred_symb l t, true), [], real_unit, [addr; v], None)) :: h) in
               if pure then static_error l "Taking the address of a ghost variable is not allowed." None;
               iter h ((x, RefType(t)) :: tenv) ghostenv ((x, addr)::env) xs
-            else
+            end else begin
               iter h ((x, t) :: tenv) ghostenv ((x, v)::env) xs
+            end
       in
       iter h tenv ghostenv env xs
     | ExprStmt e ->
@@ -677,7 +679,7 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
       let tcont _ _ _ h env = tcont sizemap tenv ghostenv h (List.filter (fun (x, _) -> List.mem_assoc x tenv) env) in
       begin match unfold_inferred_type tp with
         InductiveType (i, targs) ->
-        let (tn, targs, Some (_, itparams, ctormap, _, _)) = (i, targs, try_assoc' Ghost (pn,ilist) i inductivemap) in
+        let (tn, targs, Some (_, itparams, ctormap, _, _, _, _)) = (i, targs, try_assoc' Ghost (pn,ilist) i inductivemap) in
         let (Some tpenv) = zip itparams targs in
         let rec iter ctors cs =
           match cs with
@@ -2467,7 +2469,7 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     let penv = get_unique_var_symbs_ ps (match k with Regular -> false | _ -> true) in (* actual params invullen *)
     let heapy_vars = list_remove_dups (List.flatten (List.map (fun s -> stmt_address_taken s) ss)) in
     let heapy_ps = List.flatten (List.map (fun (x,tp) -> 
-      if List.mem x heapy_vars then 
+      if List.mem x heapy_vars then
         let addr = get_unique_var_symb_non_ghost (x ^ "_addr") (PtrType tp) in
         [(l, x, tp, addr)] 
       else 
@@ -2937,7 +2939,7 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
       ), 
       (
         structmap1, enummap1, globalmap1, modulemap1, importmodulemap1, 
-        inductivemap1, purefuncmap1,predctormap1, malloc_block_pred_map1, 
+        inductivemap1, purefuncmap1,predctormap1, struct_accessor_map1, malloc_block_pred_map1, 
         field_pred_map1, predfammap1, predinstmap1, typedefmap1, functypemap1, 
         funcmap1, boxmap,classmap1,interfmap1,classterms1,interfaceterms1, 
         abstract_types_map1
