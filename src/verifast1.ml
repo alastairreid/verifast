@@ -566,6 +566,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         loc
       * string list (* type parameters *)
       * (string * inductive_ctor_info) list
+      * (string * symbol) list (* selector functions - empty if more than one constructor *)
       * string list option (* The type is infinite if any of these type parameters are infinite; if None, it is always infinite. *)
       * int (* 0 = does not contain 'any' or predicate types; 1 = contains 'any' or predicate types, but only in positive positions; 2 = contains 'any' or predicate types in negative positions *)
     type pred_ctor_info =
@@ -1350,7 +1351,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
   
   let inductive_arities =
     List.map (fun (i, (l, tparams, _)) -> (i, (l, List.length tparams))) inductivedeclmap
-    @ List.map (fun (i, (l, tparams, _, _, _)) -> (i, (l, List.length tparams))) inductivemap0
+    @ List.map (fun (i, (l, tparams, _, _, _, _)) -> (i, (l, List.length tparams))) inductivemap0
   
   let abstract_types_map = abstract_types_map1 @ abstract_types_map0
   
@@ -1693,9 +1694,10 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         [] -> (imap, pfm, fpm)
       | Inductive (l, i, tparams, ctors)::ds -> let i=full_name pn i in
         check_tparams l [] tparams;
+        let tt = InductiveType (i, List.map (fun x -> TypeParam x) tparams) in
         let rec citer j ctormap pfm ctors =
           match ctors with
-            [] -> iter (pn,ilist) ((i, (l, tparams, List.rev ctormap))::imap) pfm fpm ds
+            [] -> ((pn,ilist), ctormap, pfm)
           | Ctor (lc, cn, name_and_type_exprs)::ctors ->
             let (argument_names, argument_type_expressions) = List.split(name_and_type_exprs) in
             let full_cn = full_name pn cn in
@@ -1706,11 +1708,33 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
               let csym =
                 mk_func_symbol full_cn (List.map provertype_of_type ts) ProverInductive (Proverapi.Ctor (CtorByOrdinal j))
               in
-              let purefunc = (full_cn, (lc, tparams, InductiveType (i, List.map (fun x -> TypeParam x) tparams), (List.combine argument_names ts), csym)) in
+              let purefunc = (full_cn, (lc, tparams, tt, (List.combine argument_names ts), csym)) in
               citer (j + 1) ((cn, purefunc)::ctormap) (purefunc::pfm) ctors
             end
         in
-        citer 0 [] pfm ctors
+        let (pni, ctormap, pfm) = citer 0 [] pfm ctors in
+        let selectors = match ctors with
+        | [Ctor (lc, cn, name_and_type_exprs)] ->
+          let sels = name_and_type_exprs |> List.map (fun (f, t) ->
+            (* construct fixpoint function symbol *)
+            let (_, (_, tparams, _, parameter_names_and_types, (csym, _))) = List.assoc cn ctormap in
+            let tp = List.assoc f parameter_names_and_types in
+            let id = mk_ident ("sel_" ^ i ^ "_" ^ f) in
+            let sel = ctxt#mk_symbol id [typenode_of_type tt] (typenode_of_type tp) (Proverapi.Fixpoint 0) in
+
+            (* construct fixpoint function clause: case C(...,f,...) -> f *)
+            let fieldnames = List.map (fun (x, t) -> x) parameter_names_and_types in
+            let apply _ cvs =
+              let Some penv = zip fieldnames cvs in
+              List.assoc f penv
+            in
+            ctxt#set_fpclauses sel 0 [(csym, apply)];
+            (f, sel)
+          ) in
+          sels
+        | _ -> []
+        in
+        iter pni ((i, (l, tparams, List.rev ctormap, selectors))::imap) pfm fpm ds
       | Func (l, Fixpoint, tparams, rto, g, ps, nonghost_callers_only, functype, contract, terminates, body_opt,Static,Public)::ds ->
         let g = full_name pn g in
         if List.mem_assoc g pfm || List.mem_assoc g purefuncmap0 then static_error l ("Duplicate pure function name: "^g) None;
@@ -1811,7 +1835,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         ec0 := ECState (ecrank0, max containsAny0 containsAny1, ecmems1 @ ecmems0)
       end
     in
-    let rec check_welldefined rank negative_rank pred_ptrs (i, ((l, _, ctors), ptr)) =
+    let rec check_welldefined rank negative_rank pred_ptrs (i, ((l, _, ctors, _), ptr)) =
       (* Invariant:
          - All nodes reachable from a -1 node are -1
          - There are no cycles through -1 nodes that go through a negative occurrence.
@@ -1838,7 +1862,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
               List.iter (fun t -> check_type negative t) tps;
               begin match try_assoc i0 welldefined_map with
                 None ->
-                let (_, _, _, _, containsAny0) = List.assoc i0 inductivemap0 in
+                let (_, _, _, _, _, containsAny0) = List.assoc i0 inductivemap0 in
                 join_contains_any_neg ptr negative containsAny0
               | Some (info0, ptr0) ->
                 let ecrank0 = get_rank ptr0 in
@@ -1876,7 +1900,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         if get_rank ptr = rank then set_rank ptr (-1)
       end
     in
-    List.map (fun (i, ((l, tparams, ctors), ptr) as entry) -> check_welldefined 1 0 [] entry; (i, (l, tparams, ctors, get_contains_any ptr))) welldefined_map
+    List.map (fun (i, ((l, tparams, ctors, sels), ptr) as entry) -> check_welldefined 1 0 [] entry; (i, (l, tparams, ctors, sels, get_contains_any ptr))) welldefined_map
     (* Postcondition: there are no cycles in the inductive datatype definition graph that go through a negative occurrence. *)
   
   let () =
@@ -1902,7 +1926,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
                 List.for_all type_is_inhabited tps &&
                 begin match try_assoc i0 inhabited_map with
                   None -> true
-                | Some ((l0, _, ctors0, _), status0) ->
+                | Some ((l0, _, ctors0, _, _), status0) ->
                   !status0 <> 1 &&
                   (check_inhabited i0 l0 ctors0 status0; true)
                 end
@@ -1913,13 +1937,13 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         status := 2
       end
     in
-    List.iter (fun (i, ((l, _, ctors, _), status)) -> check_inhabited i l ctors status) inhabited_map
+    List.iter (fun (i, ((l, _, ctors, _, _), status)) -> check_inhabited i l ctors status) inhabited_map
   
   let inductivemap1 =
     let infinite_map = List.map (fun (i, info) -> let status = ref (0, []) in (i, (info, status))) inductivemap1 in
     (* Status: (n, tparams) with n: 0 = not visited; 1 = currently visiting; 2 = infinite if one of tparams is infinite; 3 = unconditionally infinite *)
     (* Infinite = has infinitely many values *)
-    let rec determine_type_is_infinite (i, ((l, tparams, ctors, containsAny), status)) =
+    let rec determine_type_is_infinite (i, ((l, tparams, ctors, sels, containsAny), status)) =
       let (n, _) = !status in
       if n < 2 then begin
         status := (1, []);
@@ -1949,12 +1973,12 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
                   if n = 0 then determine_type_is_infinite (i0, (info0, status0));
                   let (n, cond) = !status0 in
                   if n = 3 then None else
-                  let (_, tparams, _, _) = info0 in
+                  let (_, tparams, _, _, _) = info0 in
                   let Some tpenv = zip tparams targs in
                   fold_cond [] (fun x -> type_is_infinite (List.assoc x tpenv)) cond
                 end
               | None ->
-                let (_, tparams, _, cond, _) = List.assoc i0 inductivemap0 in
+                let (_, tparams, _, _, cond, _) = List.assoc i0 inductivemap0 in
                 begin match cond with
                   None -> None
                 | Some cond ->
@@ -1973,10 +1997,10 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     in
     List.iter determine_type_is_infinite infinite_map;
     infinite_map |> List.map
-      begin fun (i, ((l, tparams, ctors, containsAny), status)) ->
+      begin fun (i, ((l, tparams, ctors, sels, containsAny), status)) ->
         let (n, cond) = !status in
         let cond = if n = 2 then Some cond else None in
-        (i, (l, tparams, ctors, cond, containsAny))
+        (i, (l, tparams, ctors, sels, cond, containsAny))
       end
   
   let inductivemap = inductivemap1 @ inductivemap0
@@ -1998,7 +2022,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     | AnyType | PredType (_, _, _, _) -> allowContainsAnyPositive
     | PureFuncType (t1, t2) -> type_satisfies_contains_any_constraint false t1 && type_satisfies_contains_any_constraint allowContainsAnyPositive t2
     | InductiveType (i, targs) ->
-      let (_, _, _, _, containsAny) = List.assoc i inductivemap in
+      let (_, _, _, _, _, containsAny) = List.assoc i inductivemap in
       (containsAny <= if allowContainsAnyPositive then 1 else 0) &&
       List.for_all (type_satisfies_contains_any_constraint allowContainsAnyPositive) targs
     | InferredType (_, stateRef) ->
@@ -2089,7 +2113,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     | Int (_, _) | RealType | PtrType _ | PredType (_, _, _, _) | ObjType _ | ArrayType _ | BoxIdType | HandleIdType | AnyType -> true
     | PureFuncType (t1, t2) -> is_universal_type t1 && is_universal_type t2
     | InductiveType (i0, targs) ->
-      let (_, _, _, cond, _) = List.assoc i0 inductivemap in
+      let (_, _, _, _, cond, _) = List.assoc i0 inductivemap in
       cond <> Some [] && List.for_all is_universal_type targs
   
   let functypedeclmap1 =
@@ -3278,7 +3302,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         match t with
           InductiveType (i, targs) ->
           begin
-            let (_, inductive_tparams, ctormap, _, _) = List.assoc i inductivemap in
+            let (_, inductive_tparams, ctormap, _, _, _) = List.assoc i inductivemap in
             let (Some tpenv) = zip inductive_tparams targs in
             let rec iter t0 wcs ctors cs =
               match cs with
@@ -3466,13 +3490,13 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     begin
     match unfold_inferred_type t with
     | InductiveType(inductive_name, targs) -> begin
-        let (_, _, constructors, _, _) = List.assoc inductive_name inductivemap in
+        let (_, _, constructors, _, _, _) = List.assoc inductive_name inductivemap in
         match constructors with
         | [constructor_name, (_, (_, _, _, param_names_types, _))] -> begin
           let params_with_correct_name = List.filter (fun (name,type_) -> name = f) param_names_types in
           match params_with_correct_name with
           | [(name, type_)] -> 
-            let (_, _, ctormap, _, _) = List.assoc inductive_name inductivemap in
+            let (_, _, ctormap, _, _, _) = List.assoc inductive_name inductivemap in
             let [(cn, (_, (_, tparams, _, parameter_names_and_types, (_, _))) : (string * inductive_ctor_info) )] = ctormap in
             let Some tpenv = zip tparams targs in
             let type_instantiated = instantiate_type tpenv type_ in
@@ -3566,7 +3590,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
             InductiveType (i, targs) -> (i, targs)
           | _ -> static_error l "Switch operand is not an inductive value." None
         in
-        let (_, inductive_tparams, ctormap, _, _) = List.assoc i inductivemap in
+        let (_, inductive_tparams, ctormap, _, _, _) = List.assoc i inductivemap in
         let (Some tpenv) = zip inductive_tparams targs in
         let rec check_cs (ctormap : (string * (inductive_ctor_info)) list) wcs cs =
           match cs with
@@ -3916,7 +3940,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         Some (_, (_, _, rt, _, _)) ->
         begin match rt with
           InductiveType (i, _) ->
-          let (_, inductive_tparams, ctormap, _, _) = List.assoc i inductivemap in
+          let (_, inductive_tparams, ctormap, _, _, _) = List.assoc i inductivemap in
           begin match try_assoc g ctormap with
             Some (_, (_, _, _, param_names_types, symb)) ->
             let (_, ts0) = List.split param_names_types in
@@ -4270,7 +4294,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         begin
         match try_assoc i inductivemap with
           None -> static_error l "Switch operand is not an inductive value." None
-        | Some (_, inductive_tparams, ctormap, _, _) ->
+        | Some (_, inductive_tparams, ctormap, _, _, _) ->
           let (Some tpenv) = zip inductive_tparams targs in
           let rec iter wcs (ctormap: (string * inductive_ctor_info) list) cs infTps =
             match cs with
@@ -5511,7 +5535,11 @@ let check_if_list_is_defined () =
           | Some (read_field, read_static_field, deref_pointer, read_array) -> cont state (read_field l v fparent fname)
         end
     | WReadInductiveField(l, e, data_type_name, constructor_name, field_name, targs) ->
-      static_error l "Inductive value field access is currently not supported." None
+      (* construct fixpoint function symbol *)
+      let (_, _, _, selectors, _, _) = List.assoc data_type_name inductivemap in
+      let selector = List.assoc field_name selectors in
+      ev state e $. fun state v ->
+      cont state (ctxt#mk_app selector [v])
     | WReadArray(l, arr, tp, i) ->
       evs state [arr; i] $. fun state [arr; i] ->
       begin
@@ -5566,7 +5594,7 @@ let check_if_list_is_defined () =
       in
       let symbol = ctxt#mk_symbol g (typenode_of_type tt :: List.map (fun (x, _) -> typenode_of_type (List.assoc x tenv)) env) (typenode_of_type tp) (Proverapi.Fixpoint 0) in
       let case_clauses = List.map (fun (SwitchExprClause (_, cn, ps, e)) -> (cn, (ps, e))) cs in
-      let (_, _, ctormap, _, _) = List.assoc i inductivemap in
+      let (_, _, ctormap, _, _, _) = List.assoc i inductivemap in
       let fpclauses =
         List.map
           begin fun (cn, (_, (_, tparams, _, parameter_names_and_types, (csym, _)))) ->
