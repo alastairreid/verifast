@@ -5580,7 +5580,6 @@ let check_if_list_is_defined () =
           | Some (read_field, read_static_field, deref_pointer, read_array) -> cont state (read_field l v fparent fname)
         end
     | WReadInductiveField(l, e, data_type_name, constructor_name, field_name, targs) ->
-      (* construct fixpoint function symbol *)
       let (_, _, _, selectors, _, _, _) = List.assoc data_type_name inductivemap in
       let selector = List.assoc field_name selectors in
       ev state e $. fun state v ->
