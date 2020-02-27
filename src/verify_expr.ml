@@ -1813,7 +1813,7 @@ module VerifyExpr(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         end $. fun h env target ->
         cont h env (LValues.Field (l, target, fparent, fname, tp, fvalue, fghost, f_symb))
       | WReadInductiveField(l, WVar (_, v, LocalVar), data_type_name, constructor_name, field_name, targs) ->
-        let (_, _, ctormap, selectors, _, _) = List.assoc data_type_name inductivemap in
+        let (_, _, ctormap, selectors, _, _, _) = List.assoc data_type_name inductivemap in
         if List.length ctormap != 1 then static_error (expr_loc lhs) "Cannot assign to inductive type with multiple constructors." None;
         let (_, (_, tparams, _, parameter_names_and_types, (csym, _))) = List.assoc constructor_name ctormap in
         if List.length parameter_names_and_types != 1 then static_error (expr_loc lhs) "Cannot assign to inductive type with multiple fields." None;
