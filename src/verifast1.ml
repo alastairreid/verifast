@@ -1714,14 +1714,15 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
             end
         in
         let (pni, ctormap, pfm) = citer 0 [] pfm ctors in
-        let selectors = match ctors with
+        (* construct selector functions to read fields of single-constructor types *)
+        let getters = match ctors with
         | [Ctor (lc, cn, name_and_type_exprs)] ->
-          let sels = name_and_type_exprs |> List.map (fun (f, t) ->
+          let gets = name_and_type_exprs |> List.map (fun (f, t) ->
             (* construct fixpoint function symbol *)
             let (_, (_, tparams, _, parameter_names_and_types, (csym, _))) = List.assoc cn ctormap in
             let tp = List.assoc f parameter_names_and_types in
-            let id = mk_ident ("sel_" ^ i ^ "_" ^ f) in
-            let sel = ctxt#mk_symbol id [typenode_of_type tt] (typenode_of_type tp) (Proverapi.Fixpoint 0) in
+            let id = mk_ident ("get_" ^ i ^ "_" ^ f) in
+            let get = ctxt#mk_symbol id [typenode_of_type tt] (typenode_of_type tp) (Proverapi.Fixpoint 0) in
 
             (* construct fixpoint function clause: case C(...,f,...) -> f *)
             let fieldnames = List.map (fun (x, t) -> x) parameter_names_and_types in
@@ -1729,14 +1730,56 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
               let Some penv = zip fieldnames cvs in
               List.assoc f penv
             in
-            ctxt#set_fpclauses sel 0 [(csym, apply)];
-            (f, sel)
+            ctxt#set_fpclauses get 0 [(csym, apply)];
+            (f, get)
           ) in
-          sels
+          gets
         | _ -> []
         in
-        let setters = [] in (* todo *)
-        iter pni ((i, (l, tparams, List.rev ctormap, selectors, setters))::imap) pfm fpm ds
+        (* construct setter functions to write fields of single-constructor types *)
+        let setters = match ctors with
+        | [Ctor (lc, cn, name_and_type_exprs)] ->
+          let setters = name_and_type_exprs |> List.map (fun (f, t) ->
+            (* construct fixpoint function symbol *)
+            let (_, (_, tparams, _, parameter_names_and_types, (csym, _))) = List.assoc cn ctormap in
+            let tp = List.assoc f parameter_names_and_types in
+            let id = mk_ident ("set_" ^ i ^ "_" ^ f) in
+            let tt1 = typenode_of_type tt in
+            let tp1 = typenode_of_type tp in
+            let set = ctxt#mk_symbol id [tt1; tp1] tt1 (Proverapi.Fixpoint 0) in
+
+            (* construct fixpoint function clause: case C(xs,_,ys) -> C(xs,new_value,ys) *)
+            let fieldnames = List.map (fun (x, t) -> x) parameter_names_and_types in
+            let apply [_; new_value] cvs =
+              let Some penv = zip fieldnames cvs in
+              let cvs = penv |> List.map (fun (g,cv) -> if g = f then new_value else cv) in
+              ctxt#mk_app csym cvs
+            in
+            ctxt#set_fpclauses set 0 [(csym, apply)];
+
+            (* add auto_lemma about getter/setter relationship:
+
+                auto_lemma(set_T_fi(x, y)) void set_get_for_T_fi(T x, Tf y);
+                  requires true;
+                  ensures C(get_T_f1(x), ... get_T_fn(x)) == x;
+            *)
+            ctxt#begin_formal;
+            let desc = "set_get_for_" ^ i ^ "_" ^ f in
+            let x = ctxt#mk_bound 0 tt1 in
+            let y = ctxt#mk_bound 1 tp1 in
+            let fields = getters |> (List.map (fun (_, getter) -> ctxt#mk_app getter [x])) in
+            let lhs = ctxt#mk_app csym fields in
+            let trigger = ctxt#mk_app set [x; y] in
+            ctxt#end_formal;
+            ctxt#assume_forall desc [trigger] [tt1; tp1] (ctxt#mk_eq lhs x);
+
+            (f, set)
+          ) in
+          setters
+        | _ -> []
+        in
+
+        iter pni ((i, (l, tparams, List.rev ctormap, getters, setters))::imap) pfm fpm ds
       | Func (l, Fixpoint, tparams, rto, g, ps, nonghost_callers_only, functype, contract, terminates, body_opt,Static,Public)::ds ->
         let g = full_name pn g in
         if List.mem_assoc g pfm || List.mem_assoc g purefuncmap0 then static_error l ("Duplicate pure function name: "^g) None;
