@@ -1700,6 +1700,11 @@ module VerifyExpr(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
       * constant_value option option ref
       * ghostness
       * termnode (* field symbol *)
+    | Inductive of
+        loc
+      * string (* local variable name *)
+      * symbol (* selector function *)
+      * symbol (* constructor function *)
     | ArrayElement of
         loc
       * termnode (* array *)
@@ -1807,6 +1812,13 @@ module VerifyExpr(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
             eval_h h env w (fun h env target -> cont h env (Some target))
         end $. fun h env target ->
         cont h env (LValues.Field (l, target, fparent, fname, tp, fvalue, fghost, f_symb))
+      | WReadInductiveField(l, WVar (_, v, LocalVar), data_type_name, constructor_name, field_name, targs) ->
+        let (_, _, ctormap, selectors, _, _) = List.assoc data_type_name inductivemap in
+        if List.length ctormap != 1 then static_error (expr_loc lhs) "Cannot assign to inductive type with multiple constructors." None;
+        let (_, (_, tparams, _, parameter_names_and_types, (csym, _))) = List.assoc constructor_name ctormap in
+        if List.length parameter_names_and_types != 1 then static_error (expr_loc lhs) "Cannot assign to inductive type with multiple fields." None;
+        let selector = List.assoc field_name selectors in
+        cont h env (LValues.Inductive (l, v, selector, csym))
       | WReadArray (l, arr, elem_tp, i) ->
         eval_h h env arr $. fun h env arr ->
         eval_h h env i $. fun h env i ->
@@ -1829,6 +1841,9 @@ module VerifyExpr(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
           consume_chunk rules h [] [] [] l (f_symb, true) [] real_unit dummypat (Some 0) [dummypat] $. fun chunk h _ [value] _ _ _ _ ->
           cont (chunk::h) env value
         end
+      | LValues.Inductive (l, v, selector, ctor) ->
+        eval_h h env (WVar (l, v, LocalVar)) $. fun h env x ->
+        cont h env (ctxt#mk_app selector [x])
       | LValues.ArrayElement (l, arr, elem_tp, i) when language = Java ->
         let pats = [TermPat arr; TermPat i; SrcPat DummyPat] in
         consume_chunk rules h [] [] [] l (array_element_symb(), true) [elem_tp] real_unit dummypat (Some 2) pats $. fun chunk h _ [_; _; value] _ _ _ _ ->
@@ -1856,6 +1871,9 @@ module VerifyExpr(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         let pats = List.map (fun t -> TermPat t) targets @ [dummypat] in
         consume_chunk rules h [] [] [] l (f_symb, true) [] real_unit real_unit_pat (Some 1) pats $. fun _ h _ _ _ _ _ _ ->
         cont (Chunk ((f_symb, true), [], real_unit, targets @ [value], None)::h) env
+      | LValues.Inductive (l, v, selector, ctor) ->
+        let x = ctxt#mk_app ctor [value] in
+        cont h (update env v x)
       | LValues.ArrayElement (l, arr, elem_tp, i) when language = Java ->
         has_heap_effects();
         if pure then static_error l "Cannot write in a pure context." None;
