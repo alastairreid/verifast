@@ -628,7 +628,7 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
           match t with
             StaticArrayType (elemTp, elemCount) ->
             produce_object t
-          | StructType sn ->
+          | StructType sn when !address_taken ->
             produce_object (RefType t)
           | _ ->
             begin fun cont ->
@@ -2938,7 +2938,7 @@ module VerifyProgram(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
       ), 
       (
         structmap1, enummap1, globalmap1, modulemap1, importmodulemap1, 
-        inductivemap1, purefuncmap1,predctormap1, malloc_block_pred_map1, 
+        inductivemap1, purefuncmap1,predctormap1, struct_accessor_map1, malloc_block_pred_map1, 
         field_pred_map1, predfammap1, predinstmap1, typedefmap1, functypemap1, 
         funcmap1, boxmap,classmap1,interfmap1,classterms1,interfaceterms1, 
         abstract_types_map1

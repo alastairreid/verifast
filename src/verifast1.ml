@@ -586,6 +586,11 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
       * termnode
       * int option (* number of input parameters; None if not precise *)
       * inductiveness
+    type struct_accessor_info =
+        loc
+      * symbol                 (* constructor function *)
+      * (string * symbol) list (* getter function for each field *)
+      * (string * symbol) list (* setter function for each field *)
     type malloc_block_pred_info =
         string (* predicate name *)
       * pred_fam_info
@@ -747,6 +752,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
       * inductive_info map
       * pure_func_info map
       * pred_ctor_info map
+      * struct_accessor_info map
       * malloc_block_pred_info map
       * ((string * string) * field_pred_info) list
       * pred_fam_info map
@@ -840,6 +846,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
       (inductivemap0: inductive_info map),
       (purefuncmap0: pure_func_info map),
       (predctormap0: pred_ctor_info map),
+      (struct_accessor_map0: struct_accessor_info map),
       (malloc_block_pred_map0: malloc_block_pred_info map),
       (field_pred_map0: ((string * string) * field_pred_info) list),
       (predfammap0: pred_fam_info map),
@@ -868,8 +875,8 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     in
     let id x = x in
     let merge_maps l
-      (structmap, enummap, globalmap, modulemap, importmodulemap, inductivemap, purefuncmap, predctormap, malloc_block_pred_map, field_pred_map, predfammap, predinstmap, typedefmap, functypemap, funcmap, boxmap, classmap, interfmap, classterms, interfaceterms, abstract_types_map)
-      (structmap0, enummap0, globalmap0, modulemap0, importmodulemap0, inductivemap0, purefuncmap0, predctormap0, malloc_block_pred_map0, field_pred_map0, predfammap0, predinstmap0, typedefmap0, functypemap0, funcmap0, boxmap0, classmap0, interfmap0, classterms0, interfaceterms0, abstract_types_map0)
+      (structmap, enummap, globalmap, modulemap, importmodulemap, inductivemap, purefuncmap, predctormap, struct_accessor_map, malloc_block_pred_map, field_pred_map, predfammap, predinstmap, typedefmap, functypemap, funcmap, boxmap, classmap, interfmap, classterms, interfaceterms, abstract_types_map)
+      (structmap0, enummap0, globalmap0, modulemap0, importmodulemap0, inductivemap0, purefuncmap0, predctormap0, struct_accessor_map0, malloc_block_pred_map0, field_pred_map0, predfammap0, predinstmap0, typedefmap0, functypemap0, funcmap0, boxmap0, classmap0, interfmap0, classterms0, interfaceterms0, abstract_types_map0)
       =
       (
 (*     append_nodups structmap structmap0 id l "struct", *)
@@ -883,6 +890,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
        append_nodups inductivemap inductivemap0 id l "inductive datatype",
        append_nodups purefuncmap purefuncmap0 id l "pure function",
        append_nodups predctormap predctormap0 id l "predicate constructor",
+       struct_accessor_map @ struct_accessor_map0,
        malloc_block_pred_map @ malloc_block_pred_map0,
        field_pred_map @ field_pred_map0,
        append_nodups predfammap predfammap0 id l "predicate",
@@ -974,7 +982,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         end
     in
 
-    let maps0 = ([], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], []) in
+    let maps0 = ([], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], []) in
     
     let (maps0, headers_included) =
       if include_prelude then
@@ -1689,6 +1697,53 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     in
     iter tparams
   
+  (* Create function to read a field *)
+  let make_getter type_name tt csym fnames f tp =
+    (* construct fixpoint function symbol *)
+    let id = mk_ident ("get_" ^ type_name ^ "_" ^ f) in
+    let get = ctxt#mk_symbol id [typenode_of_type tt] (typenode_of_type tp) (Proverapi.Fixpoint 0) in
+
+    (* construct fixpoint function clause: case C(...,f,...) -> f *)
+    let apply _ cvs =
+      let Some penv = zip fnames cvs in
+      List.assoc f penv
+    in
+    ctxt#set_fpclauses get 0 [(csym, apply)];
+    get
+
+  (* Create function to write a field *)
+  let make_setter type_name tt csym getters fnames f tp =
+    (* construct fixpoint function symbol *)
+    let id = mk_ident ("set_" ^ type_name ^ "_" ^ f) in
+    let tt1 = typenode_of_type tt in
+    let tp1 = typenode_of_type tp in
+    let set = ctxt#mk_symbol id [tt1; tp1] tt1 (Proverapi.Fixpoint 0) in
+
+    (* construct fixpoint function clause: case C(xs,_,ys) -> C(xs,new_value,ys) *)
+    let apply [_; new_value] cvs =
+      let Some penv = zip fnames cvs in
+      let cvs = penv |> List.map (fun (g, cv) -> if g = f then new_value else cv) in
+      ctxt#mk_app csym cvs
+    in
+    ctxt#set_fpclauses set 0 [(csym, apply)];
+
+    (* add auto_lemma about getter/setter relationship:
+
+        auto_lemma(set_T_fi(x, y)) void set_get_for_T_fi(T x, Ti y);
+          requires true;
+          ensures C(get_T_f1(x), ... get_T_fn(x)) == x;
+    *)
+    ctxt#begin_formal;
+    let desc = "set_get_for_" ^ type_name ^ "_" ^ f in
+    let x = ctxt#mk_bound 0 tt1 in
+    let y = ctxt#mk_bound 1 tp1 in
+    let trigger = ctxt#mk_app set [x; y] in
+    let fields = getters |> (List.map (fun (_, getter) -> ctxt#mk_app getter [x])) in
+    let lhs = ctxt#mk_app csym fields in
+    ctxt#end_formal;
+    ctxt#assume_forall desc [trigger] [tt1; tp1] (ctxt#mk_eq lhs x);
+    set
+
   let (inductivemap1, purefuncmap1, fixpointmap1) =
     let rec iter (pn,ilist) imap pfm fpm ds =
       match ds with
@@ -1717,68 +1772,23 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         (* construct selector functions to read fields of single-constructor types *)
         let getters = match ctors with
         | [Ctor (lc, cn, name_and_type_exprs)] ->
-          let gets = name_and_type_exprs |> List.map (fun (f, t) ->
-            (* construct fixpoint function symbol *)
-            let (_, (_, tparams, _, parameter_names_and_types, (csym, _))) = List.assoc cn ctormap in
+          let (_, (_, _, _, parameter_names_and_types, (csym, _))) = List.assoc cn ctormap in
+          let fieldnames = List.map fst parameter_names_and_types in
+          name_and_type_exprs |> List.map (fun (f, t) ->
             let tp = List.assoc f parameter_names_and_types in
-            let id = mk_ident ("get_" ^ i ^ "_" ^ f) in
-            let get = ctxt#mk_symbol id [typenode_of_type tt] (typenode_of_type tp) (Proverapi.Fixpoint 0) in
-
-            (* construct fixpoint function clause: case C(...,f,...) -> f *)
-            let fieldnames = List.map (fun (x, t) -> x) parameter_names_and_types in
-            let apply _ cvs =
-              let Some penv = zip fieldnames cvs in
-              List.assoc f penv
-            in
-            ctxt#set_fpclauses get 0 [(csym, apply)];
-            (f, get)
-          ) in
-          gets
+            (f, make_getter i tt csym fieldnames f tp))
         | _ -> []
         in
         (* construct setter functions to write fields of single-constructor types *)
         let setters = match ctors with
         | [Ctor (lc, cn, name_and_type_exprs)] ->
-          let setters = name_and_type_exprs |> List.map (fun (f, t) ->
-            (* construct fixpoint function symbol *)
-            let (_, (_, tparams, _, parameter_names_and_types, (csym, _))) = List.assoc cn ctormap in
+          let (_, (_, _, _, parameter_names_and_types, (csym, _))) = List.assoc cn ctormap in
+          let fieldnames = List.map fst parameter_names_and_types in
+          name_and_type_exprs |> List.map (fun (f, t) ->
             let tp = List.assoc f parameter_names_and_types in
-            let id = mk_ident ("set_" ^ i ^ "_" ^ f) in
-            let tt1 = typenode_of_type tt in
-            let tp1 = typenode_of_type tp in
-            let set = ctxt#mk_symbol id [tt1; tp1] tt1 (Proverapi.Fixpoint 0) in
-
-            (* construct fixpoint function clause: case C(xs,_,ys) -> C(xs,new_value,ys) *)
-            let fieldnames = List.map (fun (x, t) -> x) parameter_names_and_types in
-            let apply [_; new_value] cvs =
-              let Some penv = zip fieldnames cvs in
-              let cvs = penv |> List.map (fun (g,cv) -> if g = f then new_value else cv) in
-              ctxt#mk_app csym cvs
-            in
-            ctxt#set_fpclauses set 0 [(csym, apply)];
-
-            (* add auto_lemma about getter/setter relationship:
-
-                auto_lemma(set_T_fi(x, y)) void set_get_for_T_fi(T x, Tf y);
-                  requires true;
-                  ensures C(get_T_f1(x), ... get_T_fn(x)) == x;
-            *)
-            ctxt#begin_formal;
-            let desc = "set_get_for_" ^ i ^ "_" ^ f in
-            let x = ctxt#mk_bound 0 tt1 in
-            let y = ctxt#mk_bound 1 tp1 in
-            let fields = getters |> (List.map (fun (_, getter) -> ctxt#mk_app getter [x])) in
-            let lhs = ctxt#mk_app csym fields in
-            let trigger = ctxt#mk_app set [x; y] in
-            ctxt#end_formal;
-            ctxt#assume_forall desc [trigger] [tt1; tp1] (ctxt#mk_eq lhs x);
-
-            (f, set)
-          ) in
-          setters
+            (f, make_setter i tt csym getters fieldnames f tp))
         | _ -> []
         in
-
         iter pni ((i, (l, tparams, List.rev ctormap, getters, setters))::imap) pfm fpm ds
       | Func (l, Fixpoint, tparams, rto, g, ps, nonghost_callers_only, functype, contract, terminates, body_opt,Static,Public)::ds ->
         let g = full_name pn g in
@@ -1945,7 +1955,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         if get_rank ptr = rank then set_rank ptr (-1)
       end
     in
-    List.map (fun (i, ((l, tparams, ctors, sels, sets), ptr) as entry) -> check_welldefined 1 0 [] entry; (i, (l, tparams, ctors, sels, sets, get_contains_any ptr))) welldefined_map
+    List.map (fun (i, ((l, tparams, ctors, gets, sets), ptr) as entry) -> check_welldefined 1 0 [] entry; (i, (l, tparams, ctors, gets, sets, get_contains_any ptr))) welldefined_map
     (* Postcondition: there are no cycles in the inductive datatype definition graph that go through a negative occurrence. *)
   
   let () =
@@ -1958,7 +1968,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
         status := 1;
         let rec find_ctor ctors =
           match ctors with
-            [] -> static_error l "Inductive datatype is not inhabited." None
+            [] -> static_error l ("Inductive datatype is not inhabited.") None
           | (_, (_, (_, _, _, pts, _)))::ctors ->
             let (_, pts) = List.split pts in
             let rec type_is_inhabited tp =
@@ -1988,7 +1998,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     let infinite_map = List.map (fun (i, info) -> let status = ref (0, []) in (i, (info, status))) inductivemap1 in
     (* Status: (n, tparams) with n: 0 = not visited; 1 = currently visiting; 2 = infinite if one of tparams is infinite; 3 = unconditionally infinite *)
     (* Infinite = has infinitely many values *)
-    let rec determine_type_is_infinite (i, ((l, tparams, ctors, sels, sets, containsAny), status)) =
+    let rec determine_type_is_infinite (i, ((l, tparams, ctors, gets, sets, containsAny), status)) =
       let (n, _) = !status in
       if n < 2 then begin
         status := (1, []);
@@ -2042,10 +2052,10 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     in
     List.iter determine_type_is_infinite infinite_map;
     infinite_map |> List.map
-      begin fun (i, ((l, tparams, ctors, sels, sets, containsAny), status)) ->
+      begin fun (i, ((l, tparams, ctors, gets, sets, containsAny), status)) ->
         let (n, cond) = !status in
         let cond = if n = 2 then Some cond else None in
-        (i, (l, tparams, ctors, sels, sets, cond, containsAny))
+        (i, (l, tparams, ctors, gets, sets, cond, containsAny))
       end
   
   let inductivemap = inductivemap1 @ inductivemap0
@@ -2239,7 +2249,26 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
       functypedeclmap1
   
   let isparamizedfunctypepreds1 = flatmap (fun (g, (l, gh, tparams, rt, ftxmap, xmap, pn, ilist, pre, post, terminates, predfammaps)) -> predfammaps) functypedeclmap1
-  
+
+  let struct_accessor_map1: struct_accessor_info map =
+    structmap1 |> flatmap (fun (sn, (l, Some fds, _, _)) ->
+        (* For each struct "s", and each field fi, generate a tuple type and getter/setter functions
+             mk_s : T1 * ... * Tn -> struct s
+             get_s_fi : struct s -> Ti
+             set_s_fi : struct s * Ti -> struct s
+        *)
+        let cname = "mk_" ^ sn in
+        let field_types = fds |> List.map (fun (f, (_, _, t, _)) -> (f, t)) in
+        let fieldnames = List.map fst field_types in
+        let tt = StructType sn in
+        let (csym, _) = mk_func_symbol cname (List.map (fun (x, t) -> provertype_of_type t) field_types) ProverInductive (Proverapi.Ctor (CtorByOrdinal 0)) in
+        let getters = field_types |> List.map (fun (f, t) -> (f, make_getter sn tt csym fieldnames f t)) in
+        let setters = field_types |> List.map (fun (f, t) -> (f, make_setter sn tt csym getters fieldnames f t)) in
+        [(sn, (l, csym, getters, setters))]
+    )
+
+  let struct_accessor_map = struct_accessor_map1 @ struct_accessor_map0
+
   let malloc_block_pred_map1: malloc_block_pred_info map = 
     structmap1 |> flatmap begin function
       (sn, (l, Some _, _, _)) -> [(sn, mk_predfam ("malloc_block_" ^ sn) l [] 0 [PtrType (StructType sn)] (Some 1) Inductiveness_Inductive)]
@@ -3174,6 +3203,39 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
       (w, t, None)
     | Read (l, e, f) ->
       check_deref_core functypemap funcmap classmap interfmap (pn,ilist) l tparams tenv e f
+    | Select (l, e, f) ->
+      let (w, t, _) = check e in
+      begin match unfold_inferred_type t with
+      | StructType sn ->
+        begin match try_assoc sn structmap with
+        | Some (_, Some fds, _, _) ->
+          begin match try_assoc f fds with
+          | None -> static_error l ("No such field in struct '" ^ sn ^ "'.") None
+          | Some (_, gh, t, offset) ->
+            let w = WSelect (l, w, sn, f, t, gh) in
+            (w, t, None)
+          end
+        | _ -> static_error l ("Invalid dereference; struct type '" ^ sn ^ "' has not been defined.") None
+        end
+      | InductiveType(inductive_name, targs) -> begin
+          let (_, _, constructors, _, _, _, _) = List.assoc inductive_name inductivemap in
+          match constructors with
+          | [constructor_name, (_, (_, _, _, param_names_types, _))] -> begin
+            let params_with_correct_name = List.filter (fun (name,type_) -> name = f) param_names_types in
+            match params_with_correct_name with
+            | [(name, type_)] -> 
+              let (_, _, ctormap, _, _, _, _) = List.assoc inductive_name inductivemap in
+              let [(cn, (_, (_, tparams, _, parameter_names_and_types, (_, _))) : (string * inductive_ctor_info) )] = ctormap in
+              let Some tpenv = zip tparams targs in
+              let type_instantiated = instantiate_type tpenv type_ in
+              (WReadInductiveField(l, w, inductive_name, constructor_name, f, targs), type_instantiated, None)
+            | [] -> static_error l ("The constructor of the inductive data type '" ^ inductive_name ^ "' does not have any field with name '" ^ f ^ "'.") None
+            | _ -> static_error l ("The constructor of the inductive data type '" ^ inductive_name ^ "' has multiple fields with name '" ^ f ^ "'.") None
+            end
+          | _ -> static_error l ("For field access of inductive data type values, the inductive data type must have exactly one constructor, found " ^ (string_of_int (List.length constructors)) ^ ".") None
+        end
+      | _ -> static_error l ("Invalid dereference.") None
+      end
     | Deref (l, e) ->
       let (w, t, _) = check e in
       begin
@@ -3534,23 +3596,6 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
     let (w, t, _) = check_expr_core functypemap funcmap classmap interfmap (pn,ilist) tparams tenv None e in
     begin
     match unfold_inferred_type t with
-    | InductiveType(inductive_name, targs) -> begin
-        let (_, _, constructors, _, _, _, _) = List.assoc inductive_name inductivemap in
-        match constructors with
-        | [constructor_name, (_, (_, _, _, param_names_types, _))] -> begin
-          let params_with_correct_name = List.filter (fun (name,type_) -> name = f) param_names_types in
-          match params_with_correct_name with
-          | [(name, type_)] -> 
-            let (_, _, ctormap, _, _, _, _) = List.assoc inductive_name inductivemap in
-            let [(cn, (_, (_, tparams, _, parameter_names_and_types, (_, _))) : (string * inductive_ctor_info) )] = ctormap in
-            let Some tpenv = zip tparams targs in
-            let type_instantiated = instantiate_type tpenv type_ in
-            (WReadInductiveField(l, w, inductive_name, constructor_name, f, targs), type_instantiated, None)
-          | [] -> static_error l ("The constructor of the inductive data type '" ^ inductive_name ^ "' does not have any field with name '" ^ f ^ "'.") None
-          | _ -> static_error l ("The constructor of the inductive data type '" ^ inductive_name ^ "' has multiple fields with name '" ^ f ^ "'.") None
-          end
-        | _ -> static_error l ("For field access of inductive data type values, the inductive data type must have exactly one constructor, found " ^ (string_of_int (List.length constructors)) ^ ".") None
-      end
     | PtrType (StructType sn) ->
       begin
       match try_assoc sn structmap with
@@ -3775,6 +3820,7 @@ module VerifyProgram1(VerifyProgramArgs: VERIFY_PROGRAM_ARGS) = struct
       | Upcast (e, _, _) -> iter e
       | TypedExpr (e, _) -> iter e
       | WRead (_, e, _, _, _, _, _, _) -> iter e
+      | WSelect (_, e, _, _, _, _) -> iter e
       | _ -> static_error (expr_loc e) "This expression form is not supported in a static field initializer." None
     in
     iter e
@@ -5579,11 +5625,16 @@ let check_if_list_is_defined () =
             None -> static_error l "Cannot use field dereference in this context." None
           | Some (read_field, read_static_field, deref_pointer, read_array) -> cont state (read_field l v fparent fname)
         end
-    | WReadInductiveField(l, e, data_type_name, constructor_name, field_name, targs) ->
-      let (_, _, _, selectors, _, _, _) = List.assoc data_type_name inductivemap in
-      let selector = List.assoc field_name selectors in
+    | WSelect(l, e, fparent, fname, frange, fghost) ->
+      let (_, _, getters, _) = List.assoc fparent struct_accessor_map in
+      let getter = List.assoc fname getters in
       ev state e $. fun state v ->
-      cont state (ctxt#mk_app selector [v])
+      cont state (ctxt#mk_app getter [v])
+    | WReadInductiveField(l, e, data_type_name, constructor_name, field_name, targs) ->
+      let (_, _, _, getters, _, _, _) = List.assoc data_type_name inductivemap in
+      let getter = List.assoc field_name getters in
+      ev state e $. fun state v ->
+      cont state (ctxt#mk_app getter [v])
     | WReadArray(l, arr, tp, i) ->
       evs state [arr; i] $. fun state [arr; i] ->
       begin
@@ -5607,6 +5658,7 @@ let check_if_list_is_defined () =
           (* GCC documentation is not clear about it. *)
           ev state e $. fun state v ->
           cont state (field_address l v fparent fname)
+        (* todo: WSelect *)
         | WReadArray (le, w1, tp, w2) ->
           ev state w1 $. fun state arr ->
           ev state w2 $. fun state index ->

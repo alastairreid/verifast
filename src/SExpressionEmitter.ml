@@ -237,6 +237,10 @@ let rec sexpr_of_expr (expr : expr) : sexpression =
       List [ Symbol "expr-read"
            ; sexpr_of_expr expr
            ; Symbol str ]
+    | Select (loc, expr, str) ->
+      List [ Symbol "expr-select"
+           ; sexpr_of_expr expr
+           ; Symbol str ]
     | IntLit (loc, n, is_decimal, usuffix, lsuffix) ->
       build_list [ Symbol "expr-int"
                   ; Number n ]
@@ -269,6 +273,13 @@ let rec sexpr_of_expr (expr : expr) : sexpression =
                  ; "range", sexpr_of_type_ range
                  ; "stat", sexpr_of_bool stat
                  ; "cons", sexpr_of_option (sexpr_of_option sexpr_of_constant_value) !cons
+                 ; "ghost", sexpr_of_ghostness ghost ]
+    | WSelect (_, e, par, name, range, ghost) -> 
+      build_list [ Symbol "expr-w-select" ]
+                 [ "e", sexpr_of_expr e
+                 ; "par", Symbol par
+                 ; "name", Symbol name
+                 ; "range", sexpr_of_type_ range
                  ; "ghost", sexpr_of_ghostness ghost ]
     | WReadInductiveField (loc, e, i, c, f, targs) ->
       build_list [ Symbol "expr-wreadinductivefield" ]
